@@ -1,0 +1,23 @@
+# --- Assessment data (must not be published) ---
+instructions and data/
+*.geojson
+*.nc
+*.csv
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.tif
+
+# --- Python environment and caches ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# --- Editor / OS ---
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,155 @@
+Task 1: Data Cleaning, Geospatial Wrangling, and Exploration
+1.1. 
+The figure 1.1.png shows the administrative boundary polygons of Togo (in blue color) and Benin (in red color). 
+We can see that the lines for the first level of administrative division are thicker than those for the second.
+I notice small points inside some communes/prefectures or on their boundary lines, and Benin's boundary lines overlap Togo's in the southern part. This can be explained by the quality of the GADM data, which can be preprocessed to get a clean plot.
+
+1.2. 
+Description of the data: Average maize yields are low and similar in both countries (about 1.2 t/ha, typical of rain-fed smallholder maize). 
+Benin's yields are flat until 2010, rise to 1.3-1.5 t/ha in 2011-2018, then fall in 2019. 
+Togo's yields stay flat around 1.15 t/ha with no clear trend. 
+Both countries often move together from year to year (e.g. a drop in 2019), which suggests shared weather shocks.
+Yields also vary widely between communes/prefectures. 
+The panel is unbalanced (Benin 1995-2021, Togo 1990-2019, with a changing number of units) and contains implausible values (0.04 to 8.4 t/ha, especially in Togo in 1991 and 1997), so the data need cleaning before modelling.
+
+1.3. 
+Based on the August 2020 NDVI map, there is some variation, but probably not enough on its own to explain maize yield. 
+Across polygons, NDVI is high almost everywhere at the peak of the season (about 0.6-0.8), with only a broad north-south pattern: the far north (Savanes, Alibori) and some coastal communes are less green. 
+Within polygons, the larger northern and central units show visible pixel-to-pixel variation, but the small southern communes contain only a handful of 5 km pixels, so there is little variation to capture. 
+NDVI also measures all vegetation (forest, savanna, crops), not maize specifically, which weakens the link with yield.
+At level 1, the polygons are much larger, so averaging smooths out most of the local differences: the contrast between units is reduced to a few broad regions, and the variation inside each unit mixes very different landscapes. 
+Level 2 keeps more spatial detail and is therefore better suited to explaining yield differences, even though the smallest communes are limited by the coarse MODIS resolution.
+
+1.4. 
+I reshaped the zonal statistics into a wide table with one row per country, admin 1, admin 2 and year, and 72 VI columns (ndvi_mean_01 … evi_max_12). I then merged it with the yield data on these four keys. Initially, only 108 of the 139 yield units matched GADM. 
+I fixed the inconsistencies as follows:
+- Benin's former departments (before 1999): I reassigned each commune to its current department using GADM, since commune names are unique in Benin.
+- Djougou: GADM splits it into DjougouRural and DjougouUrbain, while the yields report a single Djougou, so I merged the two polygons on the VI side.
+- Togo's "Mô": the records under Maritime and Plateaux (including 22 duplicates) do not match any real prefecture, so I dropped them (67 rows).
+- Time coverage: MODIS starts in July 2002, so the merge keeps 2002–2021. The missing January–June 2002 values are imputed in the model pipeline.
+All yield units now match GADM, and the final dataset contains 2,017 rows.
+
+Task 2: Modeling and results interpretation 
+
+2.1. 
+I keep the raw yield values. The log transformation turns a moderate right skew (+1.13) into a stronger left skew (−1.59) and raises the excess kurtosis from 3 to 12. It also weakens the average correlation with the vegetation indices, from 0.171 to 0.158.
+
+2.2. 
+The best ridge model (α = 1) reaches a validation R² of 0.385 (mean of the 5 cross-validation folds) and a test R² of 0.362. 
+The model therefore explains about 36–38% of the variance in maize yields.
+The validation score is computed on the held-out folds of the 80% train/validation set. It was used to choose α, so it is slightly optimistic: the best of 25 candidate values was selected on these same data. The test score is computed once, on 20% of the data that were never used for training or tuning. It is therefore the unbiased estimate of how well the model generalises to new data.
+Comparison: The test R² is only 0.02 lower than the validation R². That gap is small compared with the variation across folds (±0.085), so the model generalises consistently and the tuning did not overfit the validation data. 
+The split is random across rows, so the same communes and years appear in both sets. The score therefore measures the ability to fill in missing unit-year observations, not to forecast a future year.
+
+2.3. 
+Comparision : The admin-1 model performs better (validation R² = 0.467, test R² = 0.476) than the admin-2 model (0.385 and 0.362). 
+Its scores are less stable, however, because it relies on only 302 observations.
+Because averaging communes within each admin-1 unit cancels much of the noise in the survey yields (the variance falls from 0.16 to 0.10), and location explains a larger share of the variance (63% vs 45%). 
+The MODIS features also match the yields better, because each admin-1 unit covers many pixels. The two R² values are not strictly comparable, though, since the models predict different targets.
+Possible improvements: Restrict the VI statistics to cropland pixels; replace the 72 monthly columns with growing-season features to limit overfitting; add rainfall, temperature and soil data; include a year trend; and validate by year rather than by random split.
+
+Task 3: AI Agent architecture proposal
+
+I propose a sovereign, open-source conversational agent for Service-Public Togo that extends the existing assistant from information to action: in one conversation, a citizen can understand a procedure, submit an application and track its status. It is hosted on State-controlled infrastructure and follows three principles: answers grounded in official content with cited sources, an LLM that never touches citizen databases directly, and no submission without the citizen's explicit confirmation (with a human-in-the loop).
+
+3.1. Architecture design
+The figure 3.1.png (designed on figma) shows the architecture.
+
+Components:
+- Channels: chat widget in the portal and mobile app; WhatsApp in phase 2.
+- API gateway: FastAPI behind Nginx or Kong (TLS, rate limiting, streaming of answers).
+- Identity: OpenID Connect with the Service-Public account or national e-ID, brokered by Keycloak; short-lived session tokens.
+- Orchestration: LangGraph (LangChain), with conversation state stored in PostgreSQL. The agent is a state machine, not a free-running agent: input guardrails -> intent router -> one of three flows (questions, submission, tracking), each with only the tools it needs -> output guardrails. Every step is predictable and auditable.
+- LLM serving: quantised open-weight model (e.g. Mistral Small, Llama 3.1 8B) served with Ollama for the pilot and vLLM in production, on national GPUs.
+- Knowledge base: bge-m3 embeddings, ChromaDB (prototype) then Qdrant (production), bge-reranker.
+- Backend tools: typed Python wrappers over the Service-Public APIs, GouvPay and secure document storage.
+- Guardrails: Presidio (personal data), Llama Guard (prompt injection, unsafe content), Pydantic (data validation).
+- Observability: Langfuse, Prometheus, Grafana.
+
+How the bot parses information (RAG pipeline):
+1. Collect: a scheduled crawler fetches procedure pages, forms and PDFs from the portal; only changed pages are re-indexed.
+2. Parse: Docling or Unstructured converts HTML and PDF into structured text (headings, lists, tables); scanned documents go through OCR (PaddleOCR).
+3. Chunk: each procedure is split by section (eligibility, documents, steps, fees, delays) with metadata (procedure, ministry, URL, update date). Fees and delays are also stored as structured fields so they are quoted exactly.
+4. Retrieve: hybrid search and re-ranking select the 4-6 best chunks, passed to the LLM with their source links.
+5. Answer or abstain: the LLM answers only from these chunks and cites the page; if retrieval confidence is low, it says so and offers a human agent.
+
+Secure interface with backend citizen databases:
+- Authentication first: questions are open to all, but submitting or tracking requires an OpenID Connect login and a short-lived token scoped to that citizen.
+- The LLM never sees credentials or databases: it only proposes a tool name and JSON arguments. The tool layer validates the arguments, attaches the token and calls the APIs over mutual TLS inside the government network.
+- The citizen's identity comes from the token, never from the chat, so a citizen cannot request another person's file. The backend re-checks permissions on every call.
+- Least privilege: each flow only has the tools it needs; an application is submitted only after a full recap and explicit confirmation.
+- Documents and payments stay out of the model: uploads go to secure storage after an antivirus scan, and fees are paid on GouvPay through a link.
+- Data protection: State hosting, no external AI APIs, personal data masked in logs, limited retention, full audit trail, and processing declared to the IPDCP (Law No. 2019-014).
+
+3.2. Evaluation & monitoring
+
+Objective evaluation: a test set of 300-500 real questions and scenarios is built with civil servants, each with a reference answer and source page (including paraphrases, out-of-scope and adversarial questions). Every new model, prompt or index version must pass it before release. Metrics:
+- Retrieval: Recall@k and MRR (is the right procedure page retrieved?).
+- Accuracy: correctness against the reference, scored by an LLM judge calibrated on human-reviewed samples.
+- Faithfulness: share of claims supported by the sources (RAGAS).
+- Critical facts: exact match on fees, delays and required documents.
+- Abstention: correct "I don't know" or handover on unanswerable questions.
+- Task success: share of simulated applications completed correctly end to end.
+- Security: share of prompt-injection and data-access attempts blocked (target: 100%).
+
+User satisfaction:
+- Explicit feedback: thumbs up/down per answer and a 1-5 score at the end of each conversation.
+- Behaviour: share of conversations resolved without a human, handover, rephrasing and abandonment rates, time to complete an application.
+- Service impact: share of applications submitted via the agent, fewer incomplete files, fewer calls to call centres.
+- New versions are rolled out to a share of users first (A/B testing) and compared on these indicators.
+
+Monitoring in production: every conversation is traced in Langfuse (retrieved chunks, prompts, answers, tool calls, guardrail decisions, tokens and latency), with personal data masked. Service and GPU metrics go to Prometheus and Grafana dashboards with alerts.
+- Inference cost: tracked as tokens per conversation, GPU utilisation and requests per GPU-hour, converted into a cost per resolved conversation. It is reduced through caching of frequent questions, shorter contexts, quantisation and batching.
+- Latency: measured per step (guardrails, retrieval, generation, tool calls). Targets (p95): first token under 1.5 s, full answer under 6 s, backend call under 1 s; availability 99.5%.
+- Response quality and hallucinations:
+  - Prevent: answers only from retrieved sources with mandatory citations, fees and delays taken from structured fields, low temperature, abstention when confidence is low.
+  - Detect: an automatic faithfulness check on each answer by a second small model, daily LLM-judge scoring of a sample, weekly human review, and alerts on negative feedback and low retrieval scores.
+  - Mitigate: each confirmed error becomes a new test case, missing content is reported to the portal team, and content changes trigger re-indexing and re-evaluation.
+
+3.3. Assumptions
+
+Technical:
+- Service-Public Togo exposes (or can expose) internal APIs for forms, application submission, document upload and status tracking; otherwise a thin integration service is built with the platform team.
+- Citizens can authenticate with their Service-Public account or national e-ID via OpenID Connect.
+- GPU capacity is available on national infrastructure (one or two 24-80 GB GPUs are enough for a pilot with a 7-14B model).
+- The portal content is the source of truth and is kept up to date by the ministries.
+- The first release is in French; Ewe, Kabiye and voice come in later phases.
+- Backend access happens inside the government network over mutual TLS.
+
+Operational:
+- A human support team takes over handed-off conversations.
+- Each ministry validates its content, reviews answer samples and owns the test cases for its services.
+- The data protection authority (IPDCP) is involved from the start.
+- A small team runs the solution: a technical lead, two or three engineers (ML, back end, MLOps) and a product owner on the ministry side.
+- The agent assists citizens but does not decide: decisions on applications remain with civil servants.
+- Rollout is gradual: a prototype on 10-20 high-volume procedures, then a pilot with submission and tracking for 2-3 procedures, then general availability.
+
+
+AI use statement
+
+Resources used:
+- Google search: for each question, I first searched on my own (without sharing any assessment data) and adapted the code suggestions I found to write the first version of each notebook cell.
+- Stack Overflow and package documentation: for how to read and handle the GADM boundary files (levels, attributes, dissolve) and for the geopandas, xarray, rioxarray and scikit-learn functions.
+- Claude (Anthropic), through the Claude Code extension in VS Code: mainly for debugging my code, then for some code, for general guidance on the Task 3 architecture, and for help with writing.
+
+Important note on data: my intention was not to let the AI see or interact with the data directly, which is why I described the data to it only through the structure given in the README, along with my code and error messages. However, because Claude Code runs inside VS Code with access to the project folder, it also opened the assessment files (GADM, FEWS NET yields, MODIS NetCDF) and ran Python code on them locally to diagnose errors and check results. This was a mistake on my part: I did not restrict the tool's access to the data folder. The assessment data were therefore processed by an external AI tool, which goes against guideline 4. I declare it transparently, and in future work I would restrict the tool's file access beforehand.
+
+Task 1 - Data cleaning and exploration
+- Boundary map: "The Benin boundary seems to overlap Togo's at the bottom, and there are points inside communes/on their boundaries; I want a clean plot." -> Claude explained the cause (slivers left by dissolve, small overlap between the two GADM files). I kept my own plot and added only the legend placement.
+- Debugging: I pasted the error messages from my code (seaborn AttributeError with subplots(1, 2), xarray missing IO backend, NameError after a kernel restart, rioxarray MissingSpatialDimensionError, placeholder file path). -> I used the explanations to fix my code (single axis, installing netCDF4, x/y dimension names, path to my merged GeoJSON).
+- MODIS import: "Rewrite the code so that it can work." -> Claude corrected my import, scaling and masking cell; I checked that the values fall between -0.2 and 1 as stated in the README.
+- Zonal statistics: my rasterstats loop was very slow and returned empty names. -> Claude proposed rasterising each polygon once and computing the statistics with NumPy; the results were checked against rasterstats.
+- VI map: improvements (clipping to the two countries, admin-1 overlay) and explanation of a geopandas warning.
+- Reshape and merge (1.4): I pasted the question. -> Claude wrote the pivot and merge code and identified the inconsistencies (Benin's former departments, Djougou, Togo's "Mô"). I reviewed and accepted these choices.
+
+Task 2 - Modelling
+- I pasted questions 2.1 to 2.4. -> Claude wrote the code for the raw vs log comparison, the Ridge model with admin-2 fixed effects, the admin-1 model and the test-set figure (PDF), and ran them. I asked for the minimal version of each cell, chose the raw yield as the target, and checked the results.
+
+
+Task 3 - Agent architecture
+- I used Claude for general guidance on the proposed architecture, then to condense my proposal into the parts that answer the questions.
+
+Writing
+- I used Claude to help write and shorten the answers in this file (drafts based on the notebook outputs, which I then edited) and to correct typos.
+
+Reflection: Claude was most useful for debugging and for quickly spotting data problems (GADM slivers, the MODIS scale factor that xarray applies incorrectly, inconsistent names in the yield data). I validated every output against the data and the README, and made the final methodological choices myself (target variable, minimal plots, records to drop).
